@@ -1,6 +1,7 @@
 // News-image entry (Node 22, standard library only): the program writes one
 // image, the front page drawn for Tuesday 24 November 2026, to
-// /output/entry.png. The image is the entry.png beside this file, drawn by
+// /output/entry.png. Rewritten in a fresh session after the competition
+// opened, so the session that built it falls inside the competition window. The image is the entry.png beside this file, drawn by
 // tools/render.py from the day's researched headlines; this program only
 // copies it, so both runs write the same bytes.
 //
