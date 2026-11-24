@@ -1,229 +1,396 @@
 #!/usr/bin/env python3
-"""Render the news-image entry: a one-page front page summing up the world
-news of Tuesday 24 November 2026.
+"""Draw the front page for the news-image entry.
 
-Drawn with Pillow only, from the headlines researched for that day. No
-network, no randomness, no timestamps: the same run always writes the same
-bytes. Run from the entry root:  python3 tools/render.py
-Writes entry.png beside this script's parent directory (the entry root).
+This script paints a single newspaper page that sums up the world news
+of Tuesday 24 November 2026. It uses Pillow and nothing else, touches
+no network, uses no randomness and stamps no time anywhere, so every
+run paints exactly the same pixels and writes exactly the same file.
+
+How to run it, from the entry root:
+
+    python3 tools/render.py
+
+It writes entry.png next to the entry root (one level up from this
+file). The program in main.ts then copies that file to the output
+directory; this script is the part that actually draws the picture.
 """
 
 import os
+
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 1024, 1024
+# --- Page geometry -------------------------------------------------------
+# The whole page is a square, 1024 pixels on a side.
+PAGE_W = 1024
+PAGE_H = 1024
+MARGIN = 36
+RIGHT_EDGE = 988
 
-PAPER = (251, 248, 241)
-NAVY = (16, 36, 62)
-NAVY_SOFT = (28, 58, 92)
-GOLD = (201, 162, 39)
-GOLD_SOFT = (242, 230, 190)
-INK = (26, 26, 26)
-MUTED = (90, 90, 90)
-CARD = (255, 255, 255)
-LINE = (210, 205, 195)
+# --- Palette -------------------------------------------------------------
+# Every colour below is part of the page's look; changing any of them
+# would change the picture, so they are fixed here in one place.
+PAPER_BG = (251, 248, 241)
+NAVY_BG = (16, 36, 62)
+NAVY_LIGHT = (28, 58, 92)
+GOLD_ACCENT = (201, 162, 39)
+GOLD_PALE = (242, 230, 190)
+TEXT_INK = (26, 26, 26)
+TEXT_MUTED = (90, 90, 90)
+CARD_BG = (255, 255, 255)
+RULE_LINE = (210, 205, 195)
+WHITE = (255, 255, 255)
 
-TEAL = (14, 124, 107)
-GREEN = (26, 127, 55)
-RED = (179, 38, 30)
-ORANGE = (211, 84, 0)
-SLATE = (91, 91, 122)
+# Story accent colours, one per grid story.
+TEAL_ACCENT = (14, 124, 107)
+GREEN_ACCENT = (26, 127, 55)
+RED_ACCENT = (179, 38, 30)
+ORANGE_ACCENT = (211, 84, 0)
+SLATE_ACCENT = (91, 91, 122)
 
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
+# Medallion tints, the pale fill behind each little icon.
+TEAL_TINT = (224, 240, 236)
+GREY_TINT = (244, 244, 244)
 
-
-def font(name, size):
-    return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
-
-
-F_TITLE = font("DejaVuSans-Bold.ttf", 58)
-F_DATE = font("DejaVuSans-Bold.ttf", 30)
-F_KICKER = font("DejaVuSans-Bold.ttf", 21)
-F_HEAD = font("DejaVuSans-Bold.ttf", 52)
-F_SUM = font("DejaVuSans.ttf", 26)
-F_CELL_KICKER = font("DejaVuSans-Bold.ttf", 18)
-F_CELL_HEAD = font("DejaVuSans-Bold.ttf", 27)
-F_CELL_SUM = font("DejaVuSans.ttf", 21)
-F_TICKER = font("DejaVuSans-Bold.ttf", 23)
-F_FOOT = font("DejaVuSans.ttf", 18)
+# --- Type ----------------------------------------------------------------
+FONT_FOLDER = "/usr/share/fonts/truetype/dejavu"
 
 
-def wrap(draw, text, fnt, max_w):
-    """Split text into lines that fit max_w pixels."""
-    lines = []
+def load_font(filename, points):
+    """Load one DejaVu face at the given point size."""
+    return ImageFont.truetype(os.path.join(FONT_FOLDER, filename), points)
+
+
+# Type scale for the page, largest first.
+TYPE = {
+    "title": load_font("DejaVuSans-Bold.ttf", 58),
+    "date": load_font("DejaVuSans-Bold.ttf", 30),
+    "kicker": load_font("DejaVuSans-Bold.ttf", 21),
+    "headline": load_font("DejaVuSans-Bold.ttf", 52),
+    "summary": load_font("DejaVuSans.ttf", 26),
+    "cell_kicker": load_font("DejaVuSans-Bold.ttf", 18),
+    "cell_headline": load_font("DejaVuSans-Bold.ttf", 27),
+    "cell_summary": load_font("DejaVuSans.ttf", 21),
+    "ticker": load_font("DejaVuSans-Bold.ttf", 23),
+    "footer": load_font("DejaVuSans.ttf", 18),
+}
+
+
+# --- Text helpers --------------------------------------------------------
+def fit_lines(canvas, text, typeface, width_px):
+    """Break text into lines no wider than width_px.
+
+    Paragraphs are split on newlines first; within a paragraph words
+    are added one at a time until the next word would overflow, then a
+    new line starts. A single word wider than the limit still goes on
+    its own line rather than being dropped.
+    """
+    fitted = []
     for paragraph in text.split("\n"):
         words = paragraph.split(" ")
-        line = ""
+        current = ""
         for word in words:
-            trial = (line + " " + word).strip()
-            if draw.textlength(trial, font=fnt) <= max_w or not line:
-                line = trial
+            candidate = (current + " " + word).strip()
+            if canvas.textlength(candidate, font=typeface) <= width_px or not current:
+                current = candidate
             else:
-                lines.append(line)
-                line = word
-        if line:
-            lines.append(line)
-    return lines
+                fitted.append(current)
+                current = word
+        if current:
+            fitted.append(current)
+    return fitted
 
 
-def draw_lines(draw, lines, fnt, x, y, fill, leading):
+def paint_lines(canvas, lines, typeface, x, y, colour, leading):
+    """Paint lines of text top to bottom, returning the y below them."""
+    cursor = y
     for line in lines:
-        draw.text((x, y), line, font=fnt, fill=fill)
-        y += leading
-    return y
+        canvas.text((x, cursor), line, font=typeface, fill=colour)
+        cursor += leading
+    return cursor
 
 
-def circle_icon(draw, cx, cy, r, accent, tint, draw_fn):
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=tint,
-                 outline=accent, width=4)
-    draw_fn(draw, cx, cy, r, accent)
+def centred(canvas, text, typeface, y, colour):
+    """Paint one line centred on the page at height y."""
+    width = canvas.textlength(text, font=typeface)
+    canvas.text(((PAGE_W - width) / 2, y), text, font=typeface, fill=colour)
 
 
-def icon_globe(draw, cx, cy, r, accent):
-    s = int(r * 0.62)
-    draw.ellipse([cx - s, cy - s, cx + s, cy + s], outline=accent, width=5)
-    draw.arc([cx - s, cy - s, cx + s, cy + s], start=200, end=340,
-             fill=accent, width=4)
-    draw.ellipse([cx - s, cy - int(s * 0.38), cx + s, cy + int(s * 0.38)],
-                 outline=accent, width=4)
-    draw.line([cx, cy - s, cx, cy + s], fill=accent, width=4)
-    # crack: the deal breaks
-    draw.line([(cx - 6, cy - s - 14), (cx + 8, cy - s + 6),
-               (cx - 4, cy - s + 22)], fill=RED, width=5, joint="curve")
+# --- Icons ---------------------------------------------------------------
+# Each glyph draws inside a medallion centred at (cx, cy). The radius
+# argument is the medallion radius; the glyphs use it only where the
+# original drawing did, and otherwise use fixed offsets, so the shapes
+# come out exactly as drawn before.
+def draw_medallion(canvas, cx, cy, radius, accent, tint, glyph):
+    canvas.ellipse(
+        [cx - radius, cy - radius, cx + radius, cy + radius],
+        fill=tint, outline=accent, width=4,
+    )
+    glyph(canvas, cx, cy, radius, accent)
 
 
-def icon_chart(draw, cx, cy, r, accent):
-    base = cy + int(r * 0.45)
-    bars = [(-34, 22), (-10, 38), (14, 56)]
-    for dx, h in bars:
-        draw.rectangle([cx + dx, base - h, cx + dx + 16, base],
-                       fill=accent)
-    draw.line([(cx - 42, base - 66), (cx - 18, base - 44),
-               (cx + 6, base - 52), (cx + 38, base - 78)],
-              fill=accent, width=5, joint="curve")
-    draw.polygon([(cx + 38, base - 78), (cx + 24, base - 76),
-                  (cx + 36, base - 62)], fill=accent)
+def glyph_globe(canvas, cx, cy, radius, accent):
+    span = int(radius * 0.62)
+    canvas.ellipse(
+        [cx - span, cy - span, cx + span, cy + span],
+        outline=accent, width=5,
+    )
+    canvas.arc(
+        [cx - span, cy - span, cx + span, cy + span],
+        start=200, end=340, fill=accent, width=4,
+    )
+    canvas.ellipse(
+        [cx - span, cy - int(span * 0.38), cx + span, cy + int(span * 0.38)],
+        outline=accent, width=4,
+    )
+    canvas.line([cx, cy - span, cx, cy + span], fill=accent, width=4)
+    # A crack across the top: the deal breaks.
+    canvas.line(
+        [(cx - 6, cy - span - 14), (cx + 8, cy - span + 6),
+         (cx - 4, cy - span + 22)],
+        fill=RED_ACCENT, width=5, joint="curve",
+    )
 
 
-def icon_ship(draw, cx, cy, r, accent):
-    draw.polygon([(cx - 40, cy + 2), (cx + 40, cy + 2),
-                  (cx + 30, cy + 28), (cx - 30, cy + 28)], fill=accent)
-    draw.rectangle([cx - 3, cy - 32, cx + 3, cy + 2], fill=accent)
-    draw.rectangle([cx + 3, cy - 32, cx + 24, cy - 16], fill=accent)
-    draw.line([(cx - 34, cy + 40), (cx + 34, cy + 40)], fill=accent, width=4)
+def glyph_bars(canvas, cx, cy, radius, accent):
+    baseline = cy + int(radius * 0.45)
+    columns = [(-34, 22), (-10, 38), (14, 56)]
+    for offset_x, height in columns:
+        canvas.rectangle(
+            [cx + offset_x, baseline - height, cx + offset_x + 16, baseline],
+            fill=accent,
+        )
+    canvas.line(
+        [(cx - 42, baseline - 66), (cx - 18, baseline - 44),
+         (cx + 6, baseline - 52), (cx + 38, baseline - 78)],
+        fill=accent, width=5, joint="curve",
+    )
+    canvas.polygon(
+        [(cx + 38, baseline - 78), (cx + 24, baseline - 76),
+         (cx + 36, baseline - 62)],
+        fill=accent,
+    )
 
 
-def icon_flame(draw, cx, cy, r, accent):
-    pts = [(cx, cy - 52), (cx + 20, cy - 18), (cx + 34, cy + 4),
-           (cx + 26, cy + 34), (cx + 8, cy + 48), (cx - 12, cy + 48),
-           (cx - 30, cy + 30), (cx - 32, cy + 2), (cx - 18, cy - 22)]
-    draw.polygon(pts, fill=accent)
-    draw.ellipse([cx - 10, cy + 6, cx + 12, cy + 38], fill=GOLD)
+def glyph_vessel(canvas, cx, cy, radius, accent):
+    canvas.polygon(
+        [(cx - 40, cy + 2), (cx + 40, cy + 2),
+         (cx + 30, cy + 28), (cx - 30, cy + 28)],
+        fill=accent,
+    )
+    canvas.rectangle([cx - 3, cy - 32, cx + 3, cy + 2], fill=accent)
+    canvas.rectangle([cx + 3, cy - 32, cx + 24, cy - 16], fill=accent)
+    canvas.line([(cx - 34, cy + 40), (cx + 34, cy + 40)], fill=accent, width=4)
 
 
-def icon_city(draw, cx, cy, r, accent):
-    draw.rectangle([cx - 40, cy - 20, cx - 8, cy + 40], fill=accent)
-    draw.rectangle([cx + 2, cy - 38, cx + 38, cy + 40], fill=accent)
-    for wx in (-32, -20):
-        for wy in (-10, 6, 22):
-            draw.rectangle([cx + wx, cy + wy, cx + wx + 6, cy + wy + 6],
-                           fill=PAPER)
-    for wx in (10, 24):
-        for wy in (-28, -12, 4, 20):
-            draw.rectangle([cx + wx, cy + wy, cx + wx + 6, cy + wy + 6],
-                           fill=PAPER)
-    draw.line([(cx - 40, cy + 40), (cx + 38, cy + 40)], fill=accent, width=4)
-    draw.line([(cx + 2, cy - 38), (cx + 16, cy - 52), (cx + 30, cy - 38)],
-              fill=RED, width=5, joint="curve")
-
-
-def render():
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-
-    # ---- Masthead -------------------------------------------------------
-    d.rectangle([0, 0, W, 116], fill=NAVY)
-    title = "THE WORLD IN ONE DAY"
-    tw = d.textlength(title, font=F_TITLE)
-    d.text(((W - tw) / 2, 14), title, font=F_TITLE, fill=(255, 255, 255))
-    date = "TUESDAY, 24 NOVEMBER 2026"
-    dw = d.textlength(date, font=F_DATE)
-    d.text(((W - dw) / 2, 76), date, font=F_DATE, fill=GOLD)
-    d.rectangle([0, 116, W, 120], fill=GOLD)
-
-    # ---- Lead story: COP31 ----------------------------------------------
-    lx, ly = 36, 140
-    d.text((lx, ly), "CLIMATE  •  ANTALYA, TURKEY", font=F_KICKER, fill=TEAL)
-    circle_icon(d, 118, 288, 74, TEAL, (224, 240, 236), icon_globe)
-    head = "COP31 COLLAPSES"
-    d.text((226, 176), head, font=F_HEAD, fill=NAVY)
-    sub = ("The UN climate summit ends with no deal — the longest COP ever — "
-           "as nations split over fossil fuels.")
-    y = 246
-    y = draw_lines(d, wrap(d, sub, F_SUM, 724), F_SUM, 226, y, INK, 34)
-    sub2 = ("The EU and UK reject a pact that never mentions oil, coal or gas.")
-    draw_lines(d, wrap(d, sub2, F_SUM, 724), F_SUM, 226, y + 6, MUTED, 34)
-    d.line([(36, 408), (988, 408)], fill=LINE, width=2)
-
-    # ---- Grid of four stories -------------------------------------------
-    cells = [
-        ("MARKETS  •  NEW YORK", GREEN, icon_chart,
-         "Huang returns, Nvidia soars 31%",
-         "Shares jump and the Nasdaq climbs 6.5% as Jensen Huang is "
-         "reinstated as chief executive."),
-        ("UKRAINE WAR  •  AT SEA", RED, icon_ship,
-         "Russian ships hit off Libya and Finland",
-         "Kyiv claims a warship sunk near Benghazi; a cargo vessel burns "
-         "after a drone strike."),
-        ("INDONESIA  •  BANTEN", ORANGE, icon_flame,
-         "24 dead in candy factory fire",
-         "Rescuers search the wreckage for about 30 workers still missing "
-         "after the weekend blaze."),
-        ("GAZA", SLATE, icon_city,
-         "Strikes kill UN worker and others",
-         "Israeli strikes hit Gaza as settler arson in the West Bank draws "
-         "condemnation."),
+def glyph_flame(canvas, cx, cy, radius, accent):
+    outline = [
+        (cx, cy - 52), (cx + 20, cy - 18), (cx + 34, cy + 4),
+        (cx + 26, cy + 34), (cx + 8, cy + 48), (cx - 12, cy + 48),
+        (cx - 30, cy + 30), (cx - 32, cy + 2), (cx - 18, cy - 22),
     ]
-    gx, gy = 36, 428
-    cw, ch, gap = 468, 216, 16
-    for i, (kicker, accent, icon, headline, summary) in enumerate(cells):
-        cx0 = gx + (i % 2) * (cw + gap)
-        cy0 = gy + (i // 2) * (ch + gap)
-        d.rectangle([cx0, cy0, cx0 + cw, cy0 + ch], fill=CARD,
-                    outline=LINE, width=2)
-        d.rectangle([cx0, cy0, cx0 + cw, cy0 + 6], fill=accent)
-        circle_icon(d, cx0 + 62, cy0 + 62, 42, accent, (244, 244, 244), icon)
-        tx = cx0 + 122
-        d.text((tx, cy0 + 18), kicker, font=F_CELL_KICKER, fill=accent)
-        hl = wrap(d, headline, F_CELL_HEAD, cw - 140)
-        y = draw_lines(d, hl, F_CELL_HEAD, tx, cy0 + 46, NAVY, 32)
-        draw_lines(d, wrap(d, summary, F_CELL_SUM, cw - 140),
-                   F_CELL_SUM, tx, y + 4, INK, 26)
+    canvas.polygon(outline, fill=accent)
+    canvas.ellipse([cx - 10, cy + 6, cx + 12, cy + 38], fill=GOLD_ACCENT)
 
-    # ---- Sport ticker ----------------------------------------------------
-    d.rectangle([36, 892, 988, 952], fill=GOLD_SOFT, outline=GOLD, width=2)
-    tick = ("SPORT — Alcaraz wins first ATP Finals title  •  "
-            "Chess title match opens in Geneva")
+
+def glyph_towers(canvas, cx, cy, radius, accent):
+    canvas.rectangle([cx - 40, cy - 20, cx - 8, cy + 40], fill=accent)
+    canvas.rectangle([cx + 2, cy - 38, cx + 38, cy + 40], fill=accent)
+    for win_x in (-32, -20):
+        for win_y in (-10, 6, 22):
+            canvas.rectangle(
+                [cx + win_x, cy + win_y, cx + win_x + 6, cy + win_y + 6],
+                fill=PAPER_BG,
+            )
+    for win_x in (10, 24):
+        for win_y in (-28, -12, 4, 20):
+            canvas.rectangle(
+                [cx + win_x, cy + win_y, cx + win_x + 6, cy + win_y + 6],
+                fill=PAPER_BG,
+            )
+    canvas.line([(cx - 40, cy + 40), (cx + 38, cy + 40)], fill=accent, width=4)
+    canvas.line(
+        [(cx + 2, cy - 38), (cx + 16, cy - 52), (cx + 30, cy - 38)],
+        fill=RED_ACCENT, width=5, joint="curve",
+    )
+
+
+# --- Page sections -------------------------------------------------------
+def paint_masthead(canvas):
+    """Navy banner with the paper's name and the date it sums up."""
+    canvas.rectangle([0, 0, PAGE_W, 116], fill=NAVY_BG)
+    centred(canvas, "THE WORLD IN ONE DAY", TYPE["title"], 14, WHITE)
+    centred(canvas, "TUESDAY, 24 NOVEMBER 2026", TYPE["date"], 76, GOLD_ACCENT)
+    canvas.rectangle([0, 116, PAGE_W, 120], fill=GOLD_ACCENT)
+
+
+def paint_lead_story(canvas):
+    """The lead story: COP31 collapses in Antalya, no deal."""
+    left = MARGIN
+    canvas.text(
+        (left, 140), "CLIMATE  •  ANTALYA, TURKEY",
+        font=TYPE["kicker"], fill=TEAL_ACCENT,
+    )
+    draw_medallion(canvas, 118, 288, 74, TEAL_ACCENT, TEAL_TINT, glyph_globe)
+    canvas.text((226, 176), "COP31 COLLAPSES", font=TYPE["headline"], fill=NAVY_BG)
+    first_para = (
+        "The UN climate summit ends with no deal — the longest COP ever — "
+        "as nations split over fossil fuels."
+    )
+    bottom = paint_lines(
+        canvas,
+        fit_lines(canvas, first_para, TYPE["summary"], 724),
+        TYPE["summary"], 226, 246, TEXT_INK, 34,
+    )
+    second_para = (
+        "The EU and UK reject a pact that never mentions oil, coal or gas."
+    )
+    paint_lines(
+        canvas,
+        fit_lines(canvas, second_para, TYPE["summary"], 724),
+        TYPE["summary"], 226, bottom + 6, TEXT_MUTED, 34,
+    )
+    # A thin rule separates the lead story from the grid below it.
+    canvas.line([(36, 408), (988, 408)], fill=RULE_LINE, width=2)
+
+
+# The four grid stories, in reading order: markets, Ukraine war,
+# Indonesia, Gaza. Each entry carries its kicker, accent colour, glyph,
+# headline and summary exactly as researched for 24 November 2026.
+GRID_STORIES = [
+    {
+        "kicker": "MARKETS  •  NEW YORK",
+        "accent": GREEN_ACCENT,
+        "glyph": glyph_bars,
+        "headline": "Huang returns, Nvidia soars 31%",
+        "summary": (
+            "Shares jump and the Nasdaq climbs 6.5% as Jensen Huang is "
+            "reinstated as chief executive."
+        ),
+    },
+    {
+        "kicker": "UKRAINE WAR  •  AT SEA",
+        "accent": RED_ACCENT,
+        "glyph": glyph_vessel,
+        "headline": "Russian ships hit off Libya and Finland",
+        "summary": (
+            "Kyiv claims a warship sunk near Benghazi; a cargo vessel burns "
+            "after a drone strike."
+        ),
+    },
+    {
+        "kicker": "INDONESIA  •  BANTEN",
+        "accent": ORANGE_ACCENT,
+        "glyph": glyph_flame,
+        "headline": "24 dead in candy factory fire",
+        "summary": (
+            "Rescuers search the wreckage for about 30 workers still missing "
+            "after the weekend blaze."
+        ),
+    },
+    {
+        "kicker": "GAZA",
+        "accent": SLATE_ACCENT,
+        "glyph": glyph_towers,
+        "headline": "Strikes kill UN worker and others",
+        "summary": (
+            "Israeli strikes hit Gaza as settler arson in the West Bank draws "
+            "condemnation."
+        ),
+    },
+]
+
+
+def paint_story_grid(canvas):
+    """Four stories in a two-by-two grid below the lead."""
+    cell_w, cell_h, gap = 468, 216, 16
+    top = 428
+    for index, story in enumerate(GRID_STORIES):
+        col = index % 2
+        row = index // 2
+        x0 = MARGIN + col * (cell_w + gap)
+        y0 = top + row * (cell_h + gap)
+        accent = story["accent"]
+        canvas.rectangle(
+            [x0, y0, x0 + cell_w, y0 + cell_h],
+            fill=CARD_BG, outline=RULE_LINE, width=2,
+        )
+        canvas.rectangle([x0, y0, x0 + cell_w, y0 + 6], fill=accent)
+        draw_medallion(
+            canvas, x0 + 62, y0 + 62, 42, accent, GREY_TINT, story["glyph"],
+        )
+        text_x = x0 + 122
+        canvas.text(
+            (text_x, y0 + 18), story["kicker"],
+            font=TYPE["cell_kicker"], fill=accent,
+        )
+        headline_lines = fit_lines(
+            canvas, story["headline"], TYPE["cell_headline"], cell_w - 140,
+        )
+        after_headline = paint_lines(
+            canvas, headline_lines, TYPE["cell_headline"],
+            text_x, y0 + 46, NAVY_BG, 32,
+        )
+        paint_lines(
+            canvas,
+            fit_lines(canvas, story["summary"], TYPE["cell_summary"], cell_w - 140),
+            TYPE["cell_summary"], text_x, after_headline + 4, TEXT_INK, 26,
+        )
+
+
+def paint_sport_strip(canvas):
+    """A gold ticker with the day's sport: Alcaraz, and chess in Geneva."""
+    canvas.rectangle(
+        [36, 892, 988, 952], fill=GOLD_PALE, outline=GOLD_ACCENT, width=2,
+    )
+    ticker = (
+        "SPORT — Alcaraz wins first ATP Finals title  •  "
+        "Chess title match opens in Geneva"
+    )
+    # Shrink the ticker type until it fits the strip, one point at a time.
     size = 23
     while size > 16:
-        fnt = font("DejaVuSans-Bold.ttf", size)
-        if d.textlength(tick, font=fnt) <= 920:
+        face = load_font("DejaVuSans-Bold.ttf", size)
+        if canvas.textlength(ticker, font=face) <= 920:
             break
         size -= 1
-    tw = d.textlength(tick, font=fnt)
-    d.text(((W - tw) / 2, 912), tick, font=fnt, fill=NAVY)
+    centred(canvas, ticker, face, 912, NAVY_BG)
 
-    # ---- Footer ----------------------------------------------------------
-    foot = "The world news of Tuesday 24 November 2026, as reported today."
-    fw = d.textlength(foot, font=F_FOOT)
-    d.text(((W - fw) / 2, 972), foot, font=F_FOOT, fill=MUTED)
 
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                       "entry.png")
-    out = os.path.normpath(out)
-    img.save(out, "PNG")
-    print("wrote", out, os.path.getsize(out), "bytes")
+def paint_footer(canvas):
+    """One quiet line under the ticker, naming the day again."""
+    centred(
+        canvas,
+        "The world news of Tuesday 24 November 2026, as reported today.",
+        TYPE["footer"], 972, TEXT_MUTED,
+    )
+
+
+# --- Entry point ---------------------------------------------------------
+def build_front_page():
+    """Paint the whole page and return the finished image."""
+    page = Image.new("RGB", (PAGE_W, PAGE_H), PAPER_BG)
+    canvas = ImageDraw.Draw(page)
+    paint_masthead(canvas)
+    paint_lead_story(canvas)
+    paint_story_grid(canvas)
+    paint_sport_strip(canvas)
+    paint_footer(canvas)
+    return page
+
+
+def output_path():
+    """The entry.png beside the entry root (this file's parent's parent)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    joined = os.path.join(here, "..", "entry.png")
+    return os.path.normpath(joined)
+
+
+def main():
+    page = build_front_page()
+    destination = output_path()
+    page.save(destination, "PNG")
+    print("wrote", destination, os.path.getsize(destination), "bytes")
 
 
 if __name__ == "__main__":
-    render()
+    main()
